@@ -1,0 +1,119 @@
+@startuml
+
+title <b>UFA mTLS Provisioning sequence
+
+
+skinparam backgroundColor #EEEBDC
+skinparam sequenceArrowThickness 2
+
+skinparam sequence {
+    ParticipantBorderColor #3C78D8
+    ParticipantBackgroundColor #A4C1F4
+}
+
+participant UFA as UFA
+participant Host as Host
+queue SQS as AWSSQS
+box "Component" #LightBlue
+participant Prov_Sync_Srv as ProvSync <<(T,#ADD1B2) Testable >>
+participant Prov_Async_Srv as ProvAsync  <<(T,#ADD1B2) Testable >>
+end box
+database DYNDB as DB
+
+participant PCA as PCA
+participant IoT as IOT
+queue EventBus as BUS
+
+group Host Side [cerberus auth?]
+    Host -> ProvSync ++ #00BB00 : Register token
+    ProvSync ->x Host: Result
+    deactivate ProvSync
+    |||
+end
+|||
+group Sync Req Handler [token auth]
+    UFA -> ProvSync ++ #00BB00 : Request GUID\nusing token
+    note left: UFA wants a cert
+    ProvSync ->x UFA: Return new GUID
+    UFA -> UFA: Create key and csr
+    note left: The CSR Common Name\n must be the GUID
+    UFA -> ProvSync: Request mTLS\nCertificate
+    note left: Request using\ntoken + GUID + CSR
+    ProvSync ->x UFA: Ack Request
+    ProvSync -> DB: Store\nrequest\ndetails
+    create AWSSQS
+    ProvSync -> AWSSQS: Queue job
+    deactivate ProvSync
+    note right: Create a Job and queue
+    |||
+end
+|||
+group Async Worker
+    AWSSQS -> ProvAsync ++ #00BB00 : Fetch job
+    note left: Fetch queued Job
+
+    ProvAsync -> PCA ++ #00BBBB : Create cert\nfrom CSR
+    activate ProvAsync
+    PCA ->x ProvAsync: Return CRT
+    deactivate ProvAsync
+    deactivate PCA
+    
+    ProvAsync -> IOT ++ #00BBBB : Register cert\nwith AWS IOT
+    activate ProvAsync
+    IOT ->x ProvAsync: OK
+    deactivate ProvAsync
+    deactivate IOT
+    
+    ProvAsync -> IOT ++ #00BBBB : Assign policy\nto cert
+    activate ProvAsync
+    IOT ->x ProvAsync: OK
+    deactivate ProvAsync
+    deactivate IOT
+    
+    ProvAsync -> IOT ++ #00BBBB : Register Thing
+    activate ProvAsync
+    IOT ->x ProvAsync: OK
+    deactivate ProvAsync
+    deactivate IOT
+    
+    ProvAsync -> BUS: Emit Event
+    ProvAsync -> DB: Update details
+    deactivate ProvAsync
+    destroy ProvAsync
+    |||
+end
+|||
+group Sync Fetch Handler [mTLS auth]
+    UFA -> ProvSync ++ #00BB00 : Polling fetch request
+    note left: Poll for the cert
+    ProvSync -> DB ++ #00BBBB : Has cert been made?
+    DB ->x ProvSync: <font color=red><b>No
+    deactivate DB
+    ProvSync ->x UFA: Try again later\n(optional not\nbefore datetime)
+    deactivate ProvSync
+    note left: <font color=red><b>Backoff delay before retry
+    ...
+    ...
+    ...
+    UFA -> ProvSync ++ #00BB00 : Polling fetch request
+    note left: Retry
+    ProvSync -> DB ++ #00BBBB : Has cert been made?
+    DB ->x ProvSync: <font color=green><b>Yes
+    deactivate DB
+    ProvSync ->x UFA: Success\nreturns mTLS\ncertificate
+    deactivate ProvSync
+    
+    |||
+end
+
+group UFA establishs MQTT subscription [mTLS auth]
+    UFA -> IOT ++ #00BBBB: Subscribe to\ntopic GUID
+    IOT -> UFA: Subscribed
+    deactivate IOT
+    |||
+end
+
+
+
+
+@enduml
